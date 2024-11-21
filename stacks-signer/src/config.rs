@@ -35,6 +35,7 @@ use crate::client::SignerSlotID;
 
 const EVENT_TIMEOUT_MS: u64 = 5000;
 const BLOCK_PROPOSAL_TIMEOUT_MS: u64 = 45_000;
+const DEFAULT_FIRST_PROPOSAL_BURN_BLOCK_TIMING_SECS: u64 = 60;
 
 #[derive(thiserror::Error, Debug)]
 /// An error occurred parsing the provided configuration
@@ -156,7 +157,7 @@ pub struct GlobalConfig {
     /// How much time to wait for a miner to propose a block following a sortition
     pub block_proposal_timeout: Duration,
     /// An optional custom Chain ID
-    chain_id: Option<u32>,
+    pub chain_id: Option<u32>,
 }
 
 /// Internal struct for loading up the config file
@@ -239,8 +240,11 @@ impl TryFrom<RawConfigFile> for GlobalConfig {
             StacksAddress::p2pkh_from_hash(raw_data.network.is_mainnet(), signer_hash);
         let event_timeout =
             Duration::from_millis(raw_data.event_timeout_ms.unwrap_or(EVENT_TIMEOUT_MS));
-        let first_proposal_burn_block_timing =
-            Duration::from_secs(raw_data.first_proposal_burn_block_timing_secs.unwrap_or(30));
+        let first_proposal_burn_block_timing = Duration::from_secs(
+            raw_data
+                .first_proposal_burn_block_timing_secs
+                .unwrap_or(DEFAULT_FIRST_PROPOSAL_BURN_BLOCK_TIMING_SECS),
+        );
         let db_path = raw_data.db_path.into();
 
         let metrics_endpoint = match raw_data.metrics_endpoint {

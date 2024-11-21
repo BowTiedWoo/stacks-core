@@ -230,7 +230,6 @@ pub struct StacksEpochReceipt {
     pub epoch_transition: bool,
     /// Was .signers updated during this block?
     pub signers_updated: bool,
-    pub coinbase_height: u64,
 }
 
 /// Headers we serve over the network

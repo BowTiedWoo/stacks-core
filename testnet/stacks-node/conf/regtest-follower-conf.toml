@@ -2,17 +2,17 @@
 # working_dir = "/dir/to/save/chainstate"
 rpc_bind = "0.0.0.0:20443"
 p2p_bind = "0.0.0.0:20444"
-bootstrap_node = "029266faff4c8e0ca4f934f34996a96af481df94a89b0c9bd515f3536a95682ddc@seed.testnet.hiro.so:30444"
+bootstrap_node = "048dd4f26101715853533dee005f0915375854fd5be73405f679c1917a5d4d16aaaf3c4c0d7a9c132a36b8c5fe1287f07dad8c910174d789eb24bdfb5ae26f5f27@regtest.stacks.co:20444"
 wait_time_for_microblocks = 10000
 
 [burnchain]
 chain = "bitcoin"
-mode = "xenon"
-peer_host = "bitcoind.testnet.stacks.co"
+mode = "krypton"
+peer_host = "bitcoind.regtest.stacks.co"
 username = "blockstack"
 password = "blockstacksystem"
-rpc_port = 18332
-peer_port = 18333
+rpc_port = 18443
+peer_port = 18444
 
 # Used for sending events to a local stacks-blockchain-api service
 # [[events_observer]]

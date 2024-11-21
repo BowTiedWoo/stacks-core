@@ -104,7 +104,7 @@ pub enum Error {
     NotInSameFork,
     InvalidChainstateDB,
     BlockTooBigError,
-    TransactionTooBigError(Option<ExecutionCost>),
+    TransactionTooBigError,
     BlockCostExceeded,
     NoTransactionsToMine,
     MicroblockStreamTooLongError,
@@ -168,9 +168,7 @@ impl fmt::Display for Error {
             Error::NoSuchBlockError => write!(f, "No such Stacks block"),
             Error::InvalidChainstateDB => write!(f, "Invalid chainstate database"),
             Error::BlockTooBigError => write!(f, "Too much data in block"),
-            Error::TransactionTooBigError(ref c) => {
-                write!(f, "Too much data in transaction: measured_cost={c:?}")
-            }
+            Error::TransactionTooBigError => write!(f, "Too much data in transaction"),
             Error::BlockCostExceeded => write!(f, "Block execution budget exceeded"),
             Error::MicroblockStreamTooLongError => write!(f, "Too many microblocks in stream"),
             Error::IncompatibleSpendingConditionError => {
@@ -248,7 +246,7 @@ impl error::Error for Error {
             Error::NoSuchBlockError => None,
             Error::InvalidChainstateDB => None,
             Error::BlockTooBigError => None,
-            Error::TransactionTooBigError(..) => None,
+            Error::TransactionTooBigError => None,
             Error::BlockCostExceeded => None,
             Error::MicroblockStreamTooLongError => None,
             Error::IncompatibleSpendingConditionError => None,
@@ -293,7 +291,7 @@ impl Error {
             Error::NoSuchBlockError => "NoSuchBlockError",
             Error::InvalidChainstateDB => "InvalidChainstateDB",
             Error::BlockTooBigError => "BlockTooBigError",
-            Error::TransactionTooBigError(..) => "TransactionTooBigError",
+            Error::TransactionTooBigError => "TransactionTooBigError",
             Error::BlockCostExceeded => "BlockCostExceeded",
             Error::MicroblockStreamTooLongError => "MicroblockStreamTooLongError",
             Error::IncompatibleSpendingConditionError => "IncompatibleSpendingConditionError",

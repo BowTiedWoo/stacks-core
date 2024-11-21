@@ -2118,7 +2118,6 @@ impl NakamotoChainState {
                 &reward_set_data,
                 &Some(signer_bitvec),
                 Some(block_timestamp),
-                receipt.coinbase_height,
             );
         }
 
@@ -3887,7 +3886,7 @@ impl NakamotoChainState {
 
     /// Append a Nakamoto Stacks block to the Stacks chain state.
     /// NOTE: This does _not_ set the block as processed!  The caller must do this.
-    pub(crate) fn append_block<'a>(
+    fn append_block<'a>(
         chainstate_tx: &mut ChainstateTx,
         clarity_instance: &'a mut ClarityInstance,
         burn_dbconn: &mut SortitionHandleConn,
@@ -4383,7 +4382,6 @@ impl NakamotoChainState {
             evaluated_epoch,
             epoch_transition: applied_epoch_transition,
             signers_updated,
-            coinbase_height,
         };
 
         Ok((epoch_receipt, clarity_commit, reward_set_data))

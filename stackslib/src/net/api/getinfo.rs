@@ -27,12 +27,11 @@ use stacks_common::util::hash::{Hash160, Sha256Sum};
 use crate::burnchains::affirmation::AffirmationMap;
 use crate::burnchains::Txid;
 use crate::chainstate::burn::db::sortdb::SortitionDB;
-use crate::chainstate::nakamoto::NakamotoChainState;
 use crate::chainstate::stacks::db::StacksChainState;
 use crate::core::mempool::MemPoolDB;
 use crate::net::http::{
     parse_json, Error, HttpRequest, HttpRequestContents, HttpRequestPreamble, HttpResponse,
-    HttpResponseContents, HttpResponsePayload, HttpResponsePreamble, HttpServerError,
+    HttpResponseContents, HttpResponsePayload, HttpResponsePreamble,
 };
 use crate::net::httpcore::{
     HttpPreambleExtensions, RPCRequestHandler, StacksHttpRequest, StacksHttpResponse,
@@ -82,7 +81,6 @@ pub struct RPCPeerInfoData {
     pub genesis_chainstate_hash: Sha256Sum,
     pub unanchored_tip: Option<StacksBlockId>,
     pub unanchored_seq: Option<u16>,
-    pub tenure_height: u64,
     pub exit_at_block_height: Option<u64>,
     pub is_fully_synced: bool,
     #[serde(default)]
@@ -108,7 +106,6 @@ impl RPCPeerInfoData {
         chainstate: &StacksChainState,
         exit_at_block_height: Option<u64>,
         genesis_chainstate_hash: &Sha256Sum,
-        coinbase_height: u64,
         ibd: bool,
     ) -> RPCPeerInfoData {
         let server_version = version_string(
@@ -151,7 +148,7 @@ impl RPCPeerInfoData {
             stacks_tip_consensus_hash: network.stacks_tip.consensus_hash.clone(),
             unanchored_tip: unconfirmed_tip,
             unanchored_seq: unconfirmed_seq,
-            exit_at_block_height,
+            exit_at_block_height: exit_at_block_height,
             is_fully_synced,
             genesis_chainstate_hash: genesis_chainstate_hash.clone(),
             node_public_key: Some(public_key_buf),
@@ -172,7 +169,6 @@ impl RPCPeerInfoData {
                     .map(|cid| format!("{}", cid))
                     .collect(),
             ),
-            tenure_height: coinbase_height,
         }
     }
 }
@@ -221,28 +217,16 @@ impl RPCRequestHandler for RPCPeerInfoRequestHandler {
         node: &mut StacksNodeState,
     ) -> Result<(HttpResponsePreamble, HttpResponseContents), NetError> {
         let ibd = node.ibd;
-
-        let rpc_peer_info: Result<RPCPeerInfoData, StacksHttpResponse> =
+        let rpc_peer_info =
             node.with_node_state(|network, _sortdb, chainstate, _mempool, rpc_args| {
-                let coinbase_height = network.stacks_tip.coinbase_height;
-
-                Ok(RPCPeerInfoData::from_network(
+                RPCPeerInfoData::from_network(
                     network,
                     chainstate,
                     rpc_args.exit_at_block_height.clone(),
                     &rpc_args.genesis_chainstate_hash,
-                    coinbase_height,
                     ibd,
-                ))
+                )
             });
-
-        let rpc_peer_info = match rpc_peer_info {
-            Ok(rpc_peer_info) => rpc_peer_info,
-            Err(response) => {
-                return response.try_into_contents().map_err(NetError::from);
-            }
-        };
-
         let mut preamble = HttpResponsePreamble::ok_json(&preamble);
         preamble.set_canonical_stacks_tip_height(Some(node.canonical_stacks_tip_height()));
         let body = HttpResponseContents::try_from_json(&rpc_peer_info)?;

@@ -23,7 +23,7 @@ pub fn ongoing_tenure_id() -> &'static str {
     "nakamoto::tenures::ongoing_tenure_id"
 }
 
-/// MARF key to map the coinbase height of a tenure to its first block ID
+/// MARF key to map the coinbase height of a tenure to its consensus hash
 pub fn ongoing_tenure_coinbase_height(coinbase_height: u64) -> String {
     format!(
         "nakamoto::tenures::ongoing_tenure_coinbase_height::{}",

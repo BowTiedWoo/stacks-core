@@ -25,6 +25,7 @@ use stacks_common::types::net::PeerHost;
 use stacks_common::types::Address;
 
 use super::test_rpc;
+use crate::net::api::getinfo::RPCPeerInfoData;
 use crate::net::api::tests::TestRPC;
 use crate::net::api::*;
 use crate::net::connection::ConnectionOptions;

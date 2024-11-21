@@ -198,6 +198,5 @@ pub fn announce_boot_receipts(
         &None,
         &None,
         None,
-        0,
     );
 }

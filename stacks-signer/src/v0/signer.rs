@@ -25,13 +25,14 @@ use clarity::types::{PrivateKey, StacksEpochId};
 use clarity::util::hash::MerkleHashFunc;
 use clarity::util::secp256k1::Secp256k1PublicKey;
 use libsigner::v0::messages::{
-    BlockAccepted, BlockRejection, BlockResponse, MessageSlotID, MockProposal, MockSignature,
-    RejectCode, SignerMessage,
+    BlockRejection, BlockResponse, MessageSlotID, MockProposal, MockSignature, RejectCode,
+    SignerMessage,
 };
 use libsigner::{BlockProposal, SignerEvent};
 use slog::{slog_debug, slog_error, slog_info, slog_warn};
 use stacks_common::types::chainstate::StacksAddress;
 use stacks_common::util::get_epoch_time_secs;
+use stacks_common::util::hash::Sha512Trunc256Sum;
 use stacks_common::util::secp256k1::MessageSignature;
 use stacks_common::{debug, error, info, warn};
 
@@ -493,8 +494,8 @@ impl Signer {
         block_response: &BlockResponse,
     ) {
         match block_response {
-            BlockResponse::Accepted(accepted) => {
-                self.handle_block_signature(stacks_client, accepted);
+            BlockResponse::Accepted((block_hash, signature)) => {
+                self.handle_block_signature(stacks_client, block_hash, signature);
             }
             BlockResponse::Rejected(block_rejection) => {
                 self.handle_block_rejection(block_rejection);
@@ -546,10 +547,13 @@ impl Signer {
         self.signer_db
             .insert_block(&block_info)
             .unwrap_or_else(|_| panic!("{self}: Failed to insert block in DB"));
-        let accepted = BlockAccepted::new(block_info.signer_signature_hash(), signature);
         // have to save the signature _after_ the block info
-        self.handle_block_signature(stacks_client, &accepted);
-        Some(BlockResponse::Accepted(accepted))
+        self.handle_block_signature(
+            stacks_client,
+            &block_info.signer_signature_hash(),
+            &signature,
+        );
+        Some(BlockResponse::accepted(signer_signature_hash, signature))
     }
 
     /// Handle the block validate reject response. Returns our block response if we have one
@@ -735,16 +739,13 @@ impl Signer {
     }
 
     /// Handle an observed signature from another signer
-    fn handle_block_signature(&mut self, stacks_client: &StacksClient, accepted: &BlockAccepted) {
-        let BlockAccepted {
-            signer_signature_hash: block_hash,
-            signature,
-            metadata,
-        } = accepted;
-        debug!(
-            "{self}: Received a block-accept signature: ({block_hash}, {signature}, {})",
-            metadata.server_version
-        );
+    fn handle_block_signature(
+        &mut self,
+        stacks_client: &StacksClient,
+        block_hash: &Sha512Trunc256Sum,
+        signature: &MessageSignature,
+    ) {
+        debug!("{self}: Received a block-accept signature: ({block_hash}, {signature})");
 
         // Have we already processed this block?
         match self

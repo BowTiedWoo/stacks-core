@@ -131,14 +131,14 @@ impl<'a, 'b> ClarityWasmContext<'a, 'b> {
         }
     }
 
-    fn push_sender(&mut self, sender: PrincipalData) {
+    pub fn push_sender(&mut self, sender: PrincipalData) {
         if let Some(current) = self.sender.take() {
             self.sender_stack.push(current);
         }
         self.sender = Some(sender);
     }
 
-    fn pop_sender(&mut self) -> Result<PrincipalData, Error> {
+    pub fn pop_sender(&mut self) -> Result<PrincipalData, Error> {
         self.sender
             .take()
             .ok_or(RuntimeErrorType::NoSenderInContext.into())
@@ -147,14 +147,14 @@ impl<'a, 'b> ClarityWasmContext<'a, 'b> {
             })
     }
 
-    fn push_caller(&mut self, caller: PrincipalData) {
+    pub fn push_caller(&mut self, caller: PrincipalData) {
         if let Some(current) = self.caller.take() {
             self.caller_stack.push(current);
         }
         self.caller = Some(caller);
     }
 
-    fn pop_caller(&mut self) -> Result<PrincipalData, Error> {
+    pub fn pop_caller(&mut self) -> Result<PrincipalData, Error> {
         self.caller
             .take()
             .ok_or(RuntimeErrorType::NoCallerInContext.into())
@@ -163,11 +163,11 @@ impl<'a, 'b> ClarityWasmContext<'a, 'b> {
             })
     }
 
-    fn push_at_block(&mut self, bhh: StacksBlockId) {
+    pub fn push_at_block(&mut self, bhh: StacksBlockId) {
         self.bhh_stack.push(bhh);
     }
 
-    fn pop_at_block(&mut self) -> Result<StacksBlockId, Error> {
+    pub fn pop_at_block(&mut self) -> Result<StacksBlockId, Error> {
         self.bhh_stack
             .pop()
             .ok_or(Error::Wasm(WasmError::WasmGeneratorError(
@@ -488,9 +488,17 @@ pub fn call_function<'a>(
     sender: Option<PrincipalData>,
     caller: Option<PrincipalData>,
     sponsor: Option<PrincipalData>,
+    mut args_offset: i32,
+    store: &mut Caller<ClarityWasmContext>,
 ) -> Result<Value, Error> {
+    let memory = store
+    .get_export("memory")
+    .and_then(|export| export.into_memory())
+    .ok_or(Error::Wasm(WasmError::MemoryNotFound))?;
+
     let epoch = global_context.epoch_id;
     let clarity_version = *contract_context.get_clarity_version();
+    // let engine = store.data().global_context.engine.clone();
     let engine = global_context.engine.clone();
     let context = ClarityWasmContext::new_run(
         global_context,
@@ -501,7 +509,8 @@ pub fn call_function<'a>(
         sponsor,
         None,
     );
-
+    // let func = store.data().contract_context().lookup_function(function_name);
+    // println!("func: {:?}", func);
     let func_types = context
         .contract_context()
         .lookup_function(function_name)
@@ -512,50 +521,35 @@ pub fn call_function<'a>(
             Module::deserialize(&engine, wasm_module)
                 .map_err(|e| Error::Wasm(WasmError::UnableToLoadModule(e)))
         })?;
-    let mut store = Store::new(&engine, context);
     let mut linker = Linker::new(&engine);
 
     // Link in the host interface functions.
     link_host_functions(&mut linker)?;
 
     let instance = linker
-        .instantiate(&mut store, &module)
+        .instantiate(store.as_context_mut(), &module)
         .map_err(|e| Error::Wasm(WasmError::UnableToLoadModule(e)))?;
 
     // Call the specified function
     let func = instance
-        .get_func(&mut store, function_name)
+        .get_func(store.as_context_mut(), function_name)
         .ok_or(CheckErrors::UndefinedFunction(function_name.to_string()))?;
-
-    // Access the global stack pointer from the instance
-    let stack_pointer = instance
-        .get_global(&mut store, "stack-pointer")
-        .ok_or(Error::Wasm(WasmError::GlobalNotFound(
-            "stack-pointer".to_string(),
-        )))?;
-    let mut offset = stack_pointer
-        .get(&mut store)
-        .i32()
-        .ok_or(Error::Wasm(WasmError::ValueTypeMismatch))?;
-
-    let memory = instance
-        .get_memory(&mut store, "memory")
-        .ok_or(Error::Wasm(WasmError::MemoryNotFound))?;
 
     // Determine how much space is needed for arguments
     let mut arg_size = 0;
     for arg in func_types.get_arg_types() {
         arg_size += get_type_in_memory_size(arg, false);
     }
-    let mut in_mem_offset = offset + arg_size;
+    let mut in_mem_offset = args_offset + arg_size;
 
     // Convert the args into wasmtime values
     let mut wasm_args = vec![];
-    for (arg, ty) in args.iter().zip(func_types.get_arg_types()) {
+    for (_, ty) in args.iter().zip(func_types.get_arg_types()) {
         let (arg_vec, new_offset, new_in_mem_offset) =
-            pass_argument_to_wasm(memory, &mut store, ty, arg, offset, in_mem_offset)?;
+            read_argument_from_wasm(memory, store, ty, args_offset, in_mem_offset)?;
+        println!("arg_vec: {:?}", arg_vec);
         wasm_args.extend(arg_vec);
-        offset = new_offset;
+        args_offset = new_offset;
         in_mem_offset = new_in_mem_offset;
     }
 
@@ -565,22 +559,29 @@ pub fn call_function<'a>(
         .as_ref()
         .ok_or(Error::Wasm(WasmError::ExpectedReturnValue))?
         .clone();
-    let (mut results, offset) = reserve_space_for_return(offset, &return_type)?;
+    let (mut results, offset) = reserve_space_for_return(args_offset, &return_type)?;
 
+    let stack_pointer = instance
+        .get_global(store.as_context_mut(), "stack-pointer")
+        .ok_or(Error::Wasm(WasmError::GlobalNotFound(
+            "stack-pointer".to_string(),
+        )))?;
+    println!("stack_pointer: {:?}", stack_pointer);
     // Update the stack pointer after space is reserved for the arguments and
     // return values.
     stack_pointer
-        .set(&mut store, Val::I32(offset))
+        .set(store.as_context_mut(), Val::I32(offset))
         .map_err(|e| Error::Wasm(WasmError::Runtime(e)))?;
 
+    println!("here stacks-core");
     // Call the function
-    func.call(&mut store, &wasm_args, &mut results)
+    func.call(store.as_context_mut(), dbg!(&wasm_args), &mut results)
         .map_err(|e| {
-            error_mapping::resolve_error(e, instance, &mut store, &epoch, &clarity_version)
+            error_mapping::resolve_error(e, instance, store.as_context_mut(), &epoch, &clarity_version)
         })?;
 
     // If the function returns a value, translate it into a Clarity `Value`
-    wasm_to_clarity_value(&return_type, 0, &results, memory, &mut &mut store, epoch)
+    wasm_to_clarity_value(&return_type, 0, &results, memory, &mut store.as_context_mut(), epoch)
         .map(|(val, _offset)| val)
         .and_then(|option_value| {
             option_value.ok_or_else(|| Error::Wasm(WasmError::ExpectedReturnValue))
@@ -826,6 +827,10 @@ fn read_from_wasm(
     length: i32,
     epoch: StacksEpochId,
 ) -> Result<Value, Error> {
+    println!("\nread_from_wasm\n");
+    println!("offset: {}", offset);
+    println!("length: {}", length);
+    println!("ty: {:?}", ty);
     match ty {
         TypeSignature::UIntType => {
             debug_assert!(
@@ -1486,230 +1491,149 @@ fn write_to_wasm(
     }
 }
 
-/// Convert a Clarity `Value` into one or more Wasm `Val`. If this value
-/// requires writing into the Wasm memory, write it to the provided `offset`.
-/// Return a vector of `Val`s that can be passed to a Wasm function, and the
-/// two offsets, adjusted to the next available memory location.
-fn pass_argument_to_wasm(
+fn read_argument_from_wasm(
     memory: Memory,
-    mut store: impl AsContextMut,
+    store: &mut Caller<ClarityWasmContext>,
     ty: &TypeSignature,
-    value: &Value,
     offset: i32,
     in_mem_offset: i32,
 ) -> Result<(Vec<Val>, i32, i32), Error> {
-    match value {
-        Value::UInt(n) => {
-            let high = (n >> 64) as u64;
-            let low = (n & 0xffff_ffff_ffff_ffff) as u64;
-            let buffer = vec![Val::I64(low as i64), Val::I64(high as i64)];
-            Ok((buffer, offset, in_mem_offset))
-        }
-        Value::Int(n) => {
-            let high = (n >> 64) as u64;
-            let low = (n & 0xffff_ffff_ffff_ffff) as u64;
-            let buffer = vec![Val::I64(low as i64), Val::I64(high as i64)];
-            Ok((buffer, offset, in_mem_offset))
-        }
-        Value::Bool(b) => Ok((
-            vec![Val::I32(if *b { 1 } else { 0 })],
-            offset,
-            in_mem_offset,
-        )),
-        Value::Optional(o) => {
-            let TypeSignature::OptionalType(inner_ty) = ty else {
-                return Err(Error::Wasm(WasmError::ValueTypeMismatch));
-            };
+    match ty {
+        TypeSignature::UIntType | TypeSignature::IntType => {
+            println!("Reading integer from offset: {}", offset);
+            let mut buffer: [u8; 8] = [0; 8];
+            memory
+                .read(store.as_context_mut(), offset as usize, &mut buffer)
+                .map_err(|e| Error::Wasm(WasmError::Runtime(e.into())))?;
+            println!("Low bytes: {:?}", buffer);
+            let low = i64::from_le_bytes(buffer);
 
-            if let Some(inner_value) = o.data.as_ref() {
-                let mut buffer = vec![Val::I32(1)];
-                let (inner_buffer, new_offset, new_in_mem_offset) = pass_argument_to_wasm(
+            memory
+                .read(store.as_context_mut(), (offset + 8) as usize, &mut buffer)
+                .map_err(|e| Error::Wasm(WasmError::Runtime(e.into())))?;
+            println!("High bytes: {:?}", buffer);
+            let high = i64::from_le_bytes(buffer);
+
+            println!("Read values - low: {}, high: {}", low, high);
+            Ok((
+                vec![Val::I64(low), Val::I64(high)],
+                offset + 16,
+                in_mem_offset,
+            ))
+        }
+
+        TypeSignature::BoolType => {
+            let mut buffer: [u8; 4] = [0; 4];
+            memory
+                .read(store.as_context_mut(), offset as usize, &mut buffer)
+                .map_err(|e| Error::Wasm(WasmError::Runtime(e.into())))?;
+            let value = i32::from_le_bytes(buffer);
+            Ok((vec![Val::I32(value)], offset + 4, in_mem_offset))
+        }
+
+        TypeSignature::OptionalType(inner_ty) => {
+            let mut buffer: [u8; 4] = [0; 4];
+            memory
+                .read(store.as_context_mut(), offset as usize, &mut buffer)
+                .map_err(|e| Error::Wasm(WasmError::Runtime(e.into())))?;
+            let indicator = i32::from_le_bytes(buffer);
+
+            let mut vals = vec![Val::I32(indicator)];
+            if indicator == 1 {
+                let (inner_vals, new_offset, new_in_mem_offset) =
+                    read_argument_from_wasm(memory, store, inner_ty, offset + 4, in_mem_offset)?;
+                vals.extend(inner_vals);
+                Ok((vals, new_offset, new_in_mem_offset))
+            } else {
+                Ok((vals, offset + 4, in_mem_offset))
+            }
+        }
+
+        TypeSignature::ResponseType(inner_tys) => {
+            let mut buffer: [u8; 4] = [0; 4];
+            memory
+                .read(store.as_context_mut(), offset as usize, &mut buffer)
+                .map_err(|e| Error::Wasm(WasmError::Runtime(e.into())))?;
+            let indicator = i32::from_le_bytes(buffer);
+
+            let mut vals = vec![Val::I32(indicator)];
+            let mut current_offset = offset + 4;
+
+            if indicator == 1 {
+                // Ok case
+                let (ok_vals, next_offset, _) = read_argument_from_wasm(
                     memory,
                     store,
-                    inner_ty,
-                    inner_value,
-                    offset,
+                    &inner_tys.0,
+                    current_offset,
                     in_mem_offset,
                 )?;
-                buffer.extend(inner_buffer);
-                Ok((buffer, new_offset, new_in_mem_offset))
+                vals.extend(ok_vals);
+                current_offset = next_offset;
             } else {
-                let buffer = clar2wasm_ty(ty)
-                    .into_iter()
-                    .map(|vt| match vt {
-                        ValType::I32 => Val::I32(0),
-                        ValType::I64 => Val::I64(0),
-                        _ => unreachable!("No other types used in Clarity-Wasm"),
-                    })
-                    .collect();
-                Ok((buffer, offset, in_mem_offset))
+                // Skip ok value size
+                current_offset += get_type_size(&inner_tys.0);
+            }
+
+            if indicator == 0 {
+                // Error case
+                let (err_vals, next_offset, next_in_mem) = read_argument_from_wasm(
+                    memory,
+                    store,
+                    &inner_tys.1,
+                    current_offset,
+                    in_mem_offset,
+                )?;
+                vals.extend(err_vals);
+                Ok((vals, next_offset, next_in_mem))
+            } else {
+                Ok((vals, current_offset, in_mem_offset))
             }
         }
-        Value::Response(r) => {
-            let TypeSignature::ResponseType(inner_tys) = ty else {
-                return Err(Error::Wasm(WasmError::ValueTypeMismatch));
-            };
-            let mut buffer = vec![Val::I32(r.committed as i32)];
-            let (value_buffer, new_offset, new_in_mem_offset) = pass_argument_to_wasm(
-                memory,
-                store,
-                if r.committed {
-                    &inner_tys.0
-                } else {
-                    &inner_tys.1
-                },
-                &r.data,
-                offset,
+
+        TypeSignature::SequenceType(_)
+        | TypeSignature::PrincipalType
+        | TypeSignature::CallableType(_) => {
+            // Read stored offset and length
+            let mut buffer: [u8; 4] = [0; 4];
+            memory
+                .read(store.as_context_mut(), offset as usize, &mut buffer)
+                .map_err(|e| Error::Wasm(WasmError::Runtime(e.into())))?;
+            let stored_offset = i32::from_le_bytes(buffer);
+
+            memory
+                .read(store.as_context_mut(), (offset + 4) as usize, &mut buffer)
+                .map_err(|e| Error::Wasm(WasmError::Runtime(e.into())))?;
+            let stored_length = i32::from_le_bytes(buffer);
+
+            Ok((
+                vec![Val::I32(stored_offset), Val::I32(stored_length)],
+                offset + 8,
                 in_mem_offset,
-            )?;
-            let empty_buffer = clar2wasm_ty(if r.committed {
-                &inner_tys.1
-            } else {
-                &inner_tys.0
-            })
-            .into_iter()
-            .map(|vt| match vt {
-                ValType::I32 => Val::I32(0),
-                ValType::I64 => Val::I64(0),
-                _ => unreachable!("No other types used in Clarity-Wasm"),
-            });
+            ))
+        }
 
-            if r.committed {
-                buffer.extend(value_buffer);
-                buffer.extend(empty_buffer);
-            } else {
-                buffer.extend(empty_buffer);
-                buffer.extend(value_buffer);
+        TypeSignature::TupleType(tuple_ty) => {
+            let mut vals = vec![];
+            let mut current_offset = offset;
+            let mut current_in_mem = in_mem_offset;
+
+            for (_, ty) in tuple_ty.get_type_map() {
+                let (field_vals, next_offset, next_in_mem) =
+                    read_argument_from_wasm(memory, store, ty, current_offset, current_in_mem)?;
+                vals.extend(field_vals);
+                current_offset = next_offset;
+                current_in_mem = next_in_mem;
             }
 
-            Ok((buffer, new_offset, new_in_mem_offset))
+            Ok((vals, current_offset, current_in_mem))
         }
-        Value::Sequence(SequenceData::String(CharType::ASCII(s))) => {
-            // For a string, write the bytes into the memory, then pass the
-            // offset and length to the Wasm function.
-            let buffer = vec![Val::I32(in_mem_offset), Val::I32(s.data.len() as i32)];
-            memory
-                .write(
-                    store.as_context_mut(),
-                    in_mem_offset as usize,
-                    s.data.as_slice(),
-                )
-                .map_err(|e| Error::Wasm(WasmError::UnableToWriteMemory(e.into())))?;
-            let adjusted_in_mem_offset = in_mem_offset + s.data.len() as i32;
-            Ok((buffer, offset, adjusted_in_mem_offset))
-        }
-        Value::Sequence(SequenceData::String(CharType::UTF8(s))) => {
-            // For a utf8 string, convert the chars to big-endian i32, convert this into a list of
-            // bytes, then pass the offset and length to the wasm function
-            let bytes: Vec<u8> = String::from_utf8(s.items().iter().flatten().copied().collect())
-                .map_err(|e| Error::Wasm(WasmError::WasmGeneratorError(e.to_string())))?
-                .chars()
-                .flat_map(|c| (c as u32).to_be_bytes())
-                .collect();
-            let buffer = vec![Val::I32(in_mem_offset), Val::I32(bytes.len() as i32)];
-            memory
-                .write(&mut store, in_mem_offset as usize, &bytes)
-                .map_err(|e| Error::Wasm(WasmError::UnableToWriteMemory(e.into())))?;
-            let adjusted_in_mem_offset = in_mem_offset + bytes.len() as i32;
-            Ok((buffer, offset, adjusted_in_mem_offset))
-        }
-        Value::Sequence(SequenceData::Buffer(b)) => {
-            // For a buffer, write the bytes into the memory, then pass the
-            // offset and length to the Wasm function.
-            let buffer = vec![Val::I32(in_mem_offset), Val::I32(b.data.len() as i32)];
-            memory
-                .write(
-                    store.as_context_mut(),
-                    in_mem_offset as usize,
-                    b.data.as_slice(),
-                )
-                .map_err(|e| Error::Wasm(WasmError::UnableToWriteMemory(e.into())))?;
-            let adjusted_in_mem_offset = in_mem_offset + b.data.len() as i32;
-            Ok((buffer, offset, adjusted_in_mem_offset))
-        }
-        Value::Sequence(SequenceData::List(l)) => {
-            let TypeSignature::SequenceType(SequenceSubtype::ListType(ltd)) = ty else {
-                return Err(Error::Wasm(WasmError::ValueTypeMismatch));
-            };
 
-            let mut buffer = vec![Val::I32(offset)];
-            let mut written = 0;
-            let mut in_mem_written = 0;
-            for item in &l.data {
-                let (len, in_mem_len) = write_to_wasm(
-                    &mut store,
-                    memory,
-                    ltd.get_list_item_type(),
-                    offset + written,
-                    in_mem_offset + in_mem_written,
-                    item,
-                    true,
-                )?;
-                written += len;
-                in_mem_written += in_mem_len;
-            }
-            buffer.push(Val::I32(written));
-            Ok((buffer, offset + written, in_mem_offset + in_mem_written))
-        }
-        Value::Principal(PrincipalData::Standard(data)) => {
-            let mut bytes: Vec<u8> = Vec::with_capacity(22);
-            let v = data.version();
-            let h = &data.1;
-            bytes.push(v);
-            bytes.extend(h);
-            bytes.push(0);
-            let buffer = vec![Val::I32(in_mem_offset), Val::I32(bytes.len() as i32)];
-            memory
-                .write(&mut store, in_mem_offset as usize, &bytes)
-                .map_err(|e| Error::Wasm(WasmError::UnableToWriteMemory(e.into())))?;
-            let adjusted_in_mem_offset = in_mem_offset + bytes.len() as i32;
-            Ok((buffer, offset, adjusted_in_mem_offset))
-        }
-        Value::Principal(PrincipalData::Contract(p))
-        | Value::CallableContract(CallableData {
-            contract_identifier: p,
-            ..
-        }) => {
-            // Callable types can just ignore the optional trait identifier, and
-            // is handled like a qualified contract
-            let QualifiedContractIdentifier { issuer, name } = p;
-            let v = issuer.version();
-            let h = &issuer.1;
-            let bytes: Vec<u8> = std::iter::once(v)
-                .chain(h.iter().copied())
-                .chain(std::iter::once(name.len() as u8))
-                .chain(name.as_bytes().iter().copied())
-                .collect();
+        TypeSignature::NoType => Ok((vec![Val::I32(0)], offset + 4, in_mem_offset)),
 
-            let buffer = vec![Val::I32(in_mem_offset), Val::I32(bytes.len() as i32)];
-            memory
-                .write(&mut store, in_mem_offset as usize, &bytes)
-                .map_err(|e| Error::Wasm(WasmError::UnableToWriteMemory(e.into())))?;
-            let adjusted_in_mem_offset = in_mem_offset + bytes.len() as i32;
-            Ok((buffer, offset, adjusted_in_mem_offset))
-        }
-        Value::Tuple(TupleData { data_map, .. }) => {
-            let TypeSignature::TupleType(tuple_ty) = ty else {
-                return Err(Error::Wasm(WasmError::ValueTypeMismatch));
-            };
+        TypeSignature::ListUnionType(_) => Err(Error::Wasm(WasmError::InvalidListUnionTypeInValue)),
 
-            let mut buffer = vec![];
-            let mut offset = offset;
-            let mut in_mem_offset = in_mem_offset;
-            for (name, ty) in tuple_ty.get_type_map() {
-                let b;
-                (b, offset, in_mem_offset) = pass_argument_to_wasm(
-                    memory,
-                    store.as_context_mut(),
-                    ty,
-                    &data_map[name],
-                    offset,
-                    in_mem_offset,
-                )?;
-                buffer.extend(b);
-            }
-            Ok((buffer, offset, in_mem_offset))
-        }
+        TypeSignature::TraitReferenceType(_) => todo!(),
     }
 }
 
@@ -6450,22 +6374,37 @@ fn link_contract_call_fn(linker: &mut Linker<ClarityWasmContext>) -> Result<(), 
                         &args_sizes,
                     )?;
 
-                let mut env = Environment {
-                    global_context: caller.data_mut().global_context,
-                    contract_context: &contract.contract_context,
-                    call_stack: &mut call_stack,
-                    sender,
-                    caller: Some(caller_contract),
-                    sponsor,
-                };
+                let result = {
+                    let data: *mut _ = &mut *caller.data_mut();
+                    let mut env = Environment {
+                        global_context: unsafe { (*data).global_context },
+                        contract_context: &contract.contract_context,
+                        call_stack: &mut call_stack,
+                        sender,
+                        caller: Some(caller_contract),
+                        sponsor,
+                    };
 
-                let result = if short_circuit_cost {
-                    env.run_free(|free_env| {
-                        free_env.execute_contract_from_wasm(contract_id, &function_name, &args)
-                    })
-                } else {
-                    env.execute_contract_from_wasm(contract_id, &function_name, &args)
-                }?;
+                    if short_circuit_cost {
+                        env.run_free(|free_env| {
+                            free_env.execute_contract_from_wasm(
+                                contract_id,
+                                &function_name,
+                                &args,
+                                args_offset,
+                                &mut caller,
+                            )
+                        })
+                    } else {
+                        env.execute_contract_from_wasm(
+                            contract_id,
+                            &function_name,
+                            &args,
+                            args_offset,
+                            &mut caller,
+                        )
+                    }?
+                };
 
                 // Write the result to the return buffer
                 let return_ty = if trait_name_length == 0 {

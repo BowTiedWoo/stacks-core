@@ -23,12 +23,14 @@ use serde::Serialize;
 use serde_json::json;
 use stacks_common::types::chainstate::StacksBlockId;
 use stacks_common::types::StacksEpochId;
+use wasmtime::Caller;
 #[cfg(feature = "clarity-wasm")]
 use wasmtime::Engine;
 
 use super::analysis::{self, ContractAnalysis};
 #[cfg(feature = "clarity-wasm")]
 use super::clarity_wasm::call_function;
+use super::clarity_wasm::ClarityWasmContext;
 use super::EvalHook;
 use crate::vm::ast::{ASTRules, ContractAST};
 use crate::vm::callables::{DefinedFunction, FunctionIdentifier};
@@ -1177,6 +1179,8 @@ impl<'a, 'b> Environment<'a, 'b> {
         contract_identifier: &QualifiedContractIdentifier,
         tx_name: &str,
         args: &[Value],
+        args_offset: i32,
+        store: &mut Caller<ClarityWasmContext>,
     ) -> Result<Value> {
         let contract_size = self
             .global_context
@@ -1187,22 +1191,25 @@ impl<'a, 'b> Environment<'a, 'b> {
         self.global_context.add_memory(contract_size)?;
 
         finally_drop_memory!(self.global_context, contract_size; {
-            let contract = self.global_context.database.get_contract(contract_identifier)?;
-
+            let contract = store.data_mut().global_context.database.get_contract(contract_identifier)?;
+            // let contract_context = store.data_mut().global_context.database.get_contract(contract_identifier)?.contract_context;
+            // let variables = contract_context.variables.clone();
+            // println!("cst: {:?}", variables.get("cst"));
             let func = contract.contract_context.lookup_function(tx_name)
                 .ok_or_else(|| { CheckErrors::UndefinedFunction(tx_name.to_string()) })?;
             if !func.is_public() {
                 return Err(CheckErrors::NoSuchPublicFunction(contract_identifier.to_string(), tx_name.to_string()).into());
             }
+            println!("func: {:?}", func);
 
             let func_identifier = func.get_identifier();
-            if self.call_stack.contains(&func_identifier) {
+            if store.data_mut().call_stack.contains(&func_identifier) {
                 return Err(CheckErrors::CircularReference(vec![func_identifier.to_string()]).into())
             }
-            self.call_stack.insert(&func_identifier, true);
+            store.data_mut().call_stack.insert(&func_identifier, true);
 
-            let res = self.execute_function_as_transaction(&func, &args, Some(&contract.contract_context), false);
-            self.call_stack.remove(&func_identifier, true)?;
+            let res = self.execute_function_as_transaction_wasm(&func, &args, Some(&contract.contract_context), false, args_offset, store);
+            store.data_mut().call_stack.remove(&func_identifier, true)?;
 
             match res {
                 Ok(value) => {
@@ -1224,6 +1231,60 @@ impl<'a, 'b> Environment<'a, 'b> {
         })
     }
 
+    pub fn execute_function_as_transaction_wasm(
+        &mut self,
+        function: &DefinedFunction,
+        args: &[Value],
+        next_contract_context: Option<&ContractContext>,
+        allow_private: bool,
+        args_offset: i32,
+        store: &mut Caller<ClarityWasmContext>,
+    ) -> Result<Value> {
+        let make_read_only = function.is_read_only();
+
+        if make_read_only {
+            store.data_mut().global_context.begin_read_only();
+        } else {
+            store.data_mut().global_context.begin();
+        }
+
+        let next_contract_context = next_contract_context.unwrap_or(self.contract_context);
+
+        let result = {
+            if next_contract_context.wasm_module.is_some() {
+                call_function(
+                    &function.get_name(),
+                    args,
+                    &mut self.global_context,
+                    &next_contract_context,
+                    self.call_stack,
+                    self.sender.clone(),
+                    self.caller.clone(),
+                    self.sponsor.clone(),
+                    args_offset,
+                    store,
+                )
+            } else {
+                let mut nested_env = Environment::new(
+                    &mut self.global_context,
+                    next_contract_context,
+                    self.call_stack,
+                    self.sender.clone(),
+                    self.caller.clone(),
+                    self.sponsor.clone(),
+                );
+                function.execute_apply(args, &mut nested_env)
+            }
+        };
+
+        if make_read_only {
+            self.global_context.roll_back()?;
+            result
+        } else {
+            self.global_context.handle_tx_result(result, allow_private)
+        }
+    }
+
     pub fn execute_function_as_transaction(
         &mut self,
         function: &DefinedFunction,
@@ -1242,41 +1303,15 @@ impl<'a, 'b> Environment<'a, 'b> {
         let next_contract_context = next_contract_context.unwrap_or(self.contract_context);
 
         let result = {
-            #[cfg(feature = "clarity-wasm")]
-            if next_contract_context.wasm_module.is_some() {
-                call_function(
-                    &function.get_name(),
-                    args,
-                    &mut self.global_context,
-                    &next_contract_context,
-                    self.call_stack,
-                    self.sender.clone(),
-                    self.caller.clone(),
-                    self.sponsor.clone(),
-                )
-            } else {
-                let mut nested_env = Environment::new(
-                    &mut self.global_context,
-                    next_contract_context,
-                    self.call_stack,
-                    self.sender.clone(),
-                    self.caller.clone(),
-                    self.sponsor.clone(),
-                );
-                function.execute_apply(args, &mut nested_env)
-            }
-            #[cfg(not(feature = "clarity-wasm"))]
-            {
-                let mut nested_env = Environment::new(
-                    &mut self.global_context,
-                    next_contract_context,
-                    self.call_stack,
-                    self.sender.clone(),
-                    self.caller.clone(),
-                    self.sponsor.clone(),
-                );
-                function.execute_apply(args, &mut nested_env)
-            }
+            let mut nested_env = Environment::new(
+                &mut self.global_context,
+                next_contract_context,
+                self.call_stack,
+                self.sender.clone(),
+                self.caller.clone(),
+                self.sponsor.clone(),
+            );
+            function.execute_apply(args, &mut nested_env)
         };
 
         if make_read_only {
